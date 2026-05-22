@@ -1,60 +1,58 @@
+import os
 import asyncio
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import httpx
 from bs4 import BeautifulSoup
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-import os
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+OFFSET = 0
 
 
 async def get_first_anekdot() -> str:
     url = "https://www.anekdot.ru/last/anekdot/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Анекдоты лежат в div.text с родителем div.topicbox
+        r = await client.get(url, headers=headers)
+        r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
     topic = soup.select_one("div.topicbox div.text")
     if not topic:
         return "Не удалось получить анекдот 😔"
-
-    # Заменяем <br> на переносы строк
     for br in topic.find_all("br"):
         br.replace_with("\n")
-
-    text = topic.get_text(separator="").strip()
-    return text
+    return topic.get_text(separator="").strip()
 
 
-async def anekdot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ищу свежий анекдот...")
-    try:
-        text = await get_first_anekdot()
-        await update.message.reply_text(text)
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await update.message.reply_text("Что-то пошло не так, попробуй позже 🤷")
+async def send_message(chat_id: int, text: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("anekdot", anekdot_command))
-    logger.info("Бот запущен. Жду команду /anekdot")
-    app.run_polling()
+async def get_updates(offset: int):
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API}/getUpdates", params={"timeout": 25, "offset": offset})
+        return r.json().get("result", [])
+
+
+async def main():
+    global OFFSET
+    print("Бот запущен. Жду команду /anekdot")
+    while True:
+        try:
+            updates = await get_updates(OFFSET)
+            for update in updates:
+                OFFSET = update["update_id"] + 1
+                msg = update.get("message", {})
+                text = msg.get("text", "")
+                chat_id = msg.get("chat", {}).get("id")
+                if chat_id and text.startswith("/anekdot"):
+                    await send_message(chat_id, "Ищу свежий анекдот...")
+                    anekdot = await get_first_anekdot()
+                    await send_message(chat_id, anekdot)
+        except Exception as e:
+            print(f"Ошибка: {e}")
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
